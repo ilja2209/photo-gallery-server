@@ -18,9 +18,9 @@ import (
 	"github.com/nfnt/resize"
 )
 
-const user = "photoFrame"
-const pswd = "Bpj5yz"
-const host = "http://192.168.88.254"
+const user = ""
+const pswd = ""
+const host = ""
 const port = 5000
 
 type NasObject struct {
