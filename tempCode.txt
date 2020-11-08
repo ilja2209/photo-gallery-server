@@ -1,0 +1,45 @@
+func processAndDownloadImageHandler(w http.ResponseWriter, r *http.Request) {
+	params := r.URL.Query()
+	path := params.Get("path")
+	width, err := strconv.ParseUint(params.Get("width"), 10, 32)
+	if err != nil {
+		fmt.Println(err)
+		http.Error(w, "width must be passed", 400)
+		return
+	}
+	height, err := strconv.ParseUint(params.Get("height"), 10, 32)
+	if err != nil {
+		fmt.Println(err)
+		http.Error(w, "height must be passed", 400)
+		return
+	}
+	fmt.Println(path)
+	fmt.Println(height)
+	// file, err := os.Open("/volume1" + path)
+	// defer file.Close()
+	// if err != nil {
+	// 	http.Error(w, "File not found.", 404)
+	// 	return
+	// }
+
+	data, err := synology.DownloadFileFromNas(token, path)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	resizeWidth := float64(width)
+	scale := resizeWidth / float64(img.Bounds().Dx())
+	newWidth, newHeight := Scale(img.Bounds(), scale)
+	newImage := resize.Resize(uint(newWidth), uint(newHeight), img, resize.Lanczos3)
+	options := &jpeg.Options{
+		Quality: 50,
+	}
+	w.Header().Set("Content-Type", "image/jpeg")
+	err = jpeg.Encode(w, newImage, options)
+}

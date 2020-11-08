@@ -2,132 +2,172 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
+	"github.com/gorilla/mux"
+	"github.com/nfnt/resize"
 	"image"
 	"image/jpeg"
 	_ "image/jpeg"
 	"io/ioutil"
 	"log"
 	"net/http"
-	"net/url"
-	"strconv"
+	"photoserver/config"
+	"photoserver/synology"
+	"strings"
 	"time"
-
-	"github.com/gorilla/mux"
-	"github.com/nfnt/resize"
 )
 
-const user = ""
-const pswd = ""
-const host = ""
-const port = 5000
+const (
+	RUNNING = iota
+	STOPPED
+)
 
-type NasObject struct {
-	Data    *NasSid `json: "data"`
-	Success bool    `json: "success"`
+type ScalingConfig struct {
+	Width  float64
+	Height float64
 }
 
-type NasSid struct {
-	Sid string `json: "sid"`
+type ConnectionConfig struct {
+	Port string
+}
+
+type PhotoServerConfig struct {
+	ConnectionConf ConnectionConfig
+	BaseDirectory  string
+	ScaleConf      ScalingConfig
 }
 
 var token string
+var serverConfig PhotoServerConfig
 
-func getToken() (str string, err error) {
-	request := host + ":" + strconv.Itoa(port) + "/webapi/auth.cgi?api=SYNO.API.Auth&version=3&method=login&account=" + user + "&passwd=" + pswd + "&session=FileStation&format=sid"
-	resp, err := http.Get(request)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-	bodyString := string(bodyBytes)
-	fmt.Println(bodyString)
-	nasObject := NasObject{
-		Data: &NasSid{},
-	}
-	_ = json.Unmarshal([]byte(bodyString), &nasObject)
-	return nasObject.Data.Sid, nil
+func indexingHandler(writer http.ResponseWriter, request *http.Request) {
+	go index()
 }
 
-func downloadImageFromNas(path string) (buf []byte, err error) {
-	fmt.Println(token)
+func indexingStatusHandler(writer http.ResponseWriter, request *http.Request) {
+
+}
+
+func index() {
+	files, _ := synology.RecursiveList(token, serverConfig.BaseDirectory)
+	queue := make(chan synology.NasFile, 12)
+	for i := 0; i < 5; i++ {
+		go process(queue)
+	}
+
+	for _, file := range filter(files, isImage) {
+		queue <- file
+	}
+	close(queue)
+}
+
+func filter(files []synology.NasFile, predicate func(file synology.NasFile) bool) []synology.NasFile {
+	var filteredSlice []synology.NasFile
+	for _, file := range files {
+		if predicate(file) {
+			filteredSlice = append(filteredSlice, file)
+		}
+	}
+	return filteredSlice
+}
+
+func isImage(file synology.NasFile) bool {
+	return !file.IsDir &&
+		(strings.Contains(file.Name, ".jpg") ||
+			strings.Contains(file.Name, ".JPG") ||
+			strings.Contains(file.Name, ".jpeg"))
+}
+
+func process(queue chan synology.NasFile) {
+	for {
+		file := <-queue
+		//Make db record here
+		err := processImage(file)
+		if err != nil {
+			fmt.Println(err)
+		}
+	}
+}
+
+func processImage(file synology.NasFile) error {
+	//download
+	//resize
+	//describe (find faces e.t.c)
+	fmt.Println("Process file: " + file.Path)
+	err := downloadAndSave(file)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func downloadAndSave(file synology.NasFile) error {
+	fmt.Println("Download file: " + file.Path)
+	data, err := synology.DownloadFileFromNas(token, file.Path)
+	if err != nil {
+		return err
+	}
+	resizedImage, err := resizeImage(data, serverConfig.ScaleConf.Width, serverConfig.ScaleConf.Height)
+	if err != nil {
+		return err
+	}
+	fmt.Println("Save file: " + "C:\\temp\\" + file.Path + file.Name)
+	err = ioutil.WriteFile("C:\\temp\\"+file.Name, resizedImage, 0644)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func resizeImage(data []byte, w float64, h float64) ([]byte, error) {
+	img, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
 		return nil, err
 	}
-	request := host + ":" + strconv.Itoa(port) + "/webapi/entry.cgi?api=SYNO.FileStation.Download&version=2&method=download&path=" + url.QueryEscape(path) + "&mode=download&_sid=" + token
-	resp, err := http.Get(request)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	//if resp.Status ==
-	buff := new(bytes.Buffer)
-	buff.ReadFrom(resp.Body)
-	return buff.Bytes(), nil
-}
 
-func processAndDownloadImageHandler(w http.ResponseWriter, r *http.Request) {
-	params := r.URL.Query()
-	path := params.Get("path")
-	width, err := strconv.ParseUint(params.Get("width"), 10, 32)
-	if err != nil {
-		fmt.Println(err)
-		http.Error(w, "width must be passed", 400)
-		return
-	}
-	height, err := strconv.ParseUint(params.Get("height"), 10, 32)
-	if err != nil {
-		fmt.Println(err)
-		http.Error(w, "height must be passed", 400)
-		return
-	}
-	fmt.Println(path)
-	fmt.Println(height)
-	// file, err := os.Open("/volume1" + path)
-	// defer file.Close()
-	// if err != nil {
-	// 	http.Error(w, "File not found.", 404)
-	// 	return
-	// }
-
-	data, err := downloadImageFromNas(path)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	image, _, err := image.Decode(bytes.NewReader(data))
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-
-	resizeWidth := float64(width)
-	scale := resizeWidth / float64(image.Bounds().Dx())
-	newWidth, newHeight := Scale(image.Bounds(), scale)
-	newImage := resize.Resize(uint(newWidth), uint(newHeight), image, resize.Lanczos3)
+	scale := w / float64(img.Bounds().Dx())
+	newWidth, newHeight := imgScale(img.Bounds(), scale)
+	newImage := resize.Resize(newWidth, newHeight, img, resize.Lanczos3)
 	options := &jpeg.Options{
 		Quality: 50,
 	}
-	w.Header().Set("Content-Type", "image/jpeg")
-	err = jpeg.Encode(w, newImage, options)
+	buf := new(bytes.Buffer)
+	err = jpeg.Encode(buf, newImage, options)
+	if err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
-//Scale is ...
-func Scale(image image.Rectangle, scale float64) (width, height uint) {
+func imgScale(image image.Rectangle, scale float64) (width, height uint) {
 	return uint(float64(image.Dx()) * scale), uint(float64(image.Dy()) * scale)
 }
 
 func main() {
-	token, _ = getToken()
+	synToken, err := synology.GetToken()
+	if err != nil {
+		panic(err)
+	}
+	token = synToken
+	fmt.Print(token)
+
+	serverConfig = PhotoServerConfig{
+		ConnectionConf: ConnectionConfig{Port: config.GetEnv("PORT", "8080")},
+		BaseDirectory:  config.GetEnv("BASE_DIRECTORY", "/photo"),
+		ScaleConf: ScalingConfig{
+			Width:  config.GetEnvAsFloat64("SCALE_WIDTH", 0.0),
+			Height: config.GetEnvAsFloat64("SCALE_HEIGHT", 0.0),
+		},
+	}
+
 	router := mux.NewRouter().StrictSlash(true)
 
-	router.HandleFunc("/api/v1/image", processAndDownloadImageHandler).Methods("GET")
+	router.HandleFunc("/api/v1/photos/{id}/image", func(writer http.ResponseWriter, request *http.Request) {}).Methods("GET")
+	router.HandleFunc("/api/v1/index", indexingHandler).Methods("POST") // params: full=true/false. Unblocking operation
+	router.HandleFunc("/api/v1/index/status", indexingStatusHandler).Methods("GET")
+	router.HandleFunc("/api/v1/photos/{id}", func(writer http.ResponseWriter, request *http.Request) {}).Methods("GET") // returns info about the photo
+	router.HandleFunc("/api/v1/photos", func(writer http.ResponseWriter, request *http.Request) {}).Methods("GET")      // returns list all photos
+	router.HandleFunc("/api/v1/index", func(writer http.ResponseWriter, request *http.Request) {}).Methods("GET")       // returns index status
 
 	router.HandleFunc("/api/v1", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "OK")
@@ -135,7 +175,7 @@ func main() {
 
 	srv := &http.Server{
 		Handler:      router,
-		Addr:         ":8080",
+		Addr:         ":" + serverConfig.ConnectionConf.Port,
 		WriteTimeout: 15 * time.Second,
 		ReadTimeout:  15 * time.Second,
 	}
