@@ -1,4 +1,4 @@
-# photo-gallery-server
+# photoserver
 
 sudo docker build --tag photogallery-0.1-alpha .
 
