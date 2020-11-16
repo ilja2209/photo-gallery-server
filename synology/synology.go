@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"photoserver/config"
+	"time"
 )
 
 type NasObject struct {
@@ -50,6 +51,10 @@ func getConfig() NasConfig {
 	}
 }
 
+var client = http.Client{
+	Timeout: 60 * time.Second,
+}
+
 func GetToken() (string, error) {
 	synConfig := getConfig()
 	request := "http://" +
@@ -63,7 +68,8 @@ func GetToken() (string, error) {
 		"passwd=" + synConfig.Password + "&" +
 		"session=FileStation&" +
 		"format=sid"
-	resp, err := http.Get(request)
+
+	resp, err := client.Get(request)
 	if err != nil {
 		return "", err
 	}
@@ -96,7 +102,7 @@ func List(token string, directory string) ([]NasFile, error) {
 		"additional=real_path&" +
 		"_sid=" + token
 
-	resp, err := http.Get(request)
+	resp, err := client.Get(request)
 	if err != nil {
 		return nil, err
 	}
@@ -159,7 +165,7 @@ func DownloadFileFromNas(token string, path string) (buf []byte, err error) {
 		"path=" + url.QueryEscape(path) + "&" +
 		"mode=download&" +
 		"_sid=" + token
-	resp, err := http.Get(request)
+	resp, err := client.Get(request)
 	if err != nil {
 		return nil, err
 	}
