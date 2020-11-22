@@ -1,18 +1,22 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"github.com/gorilla/mux"
 	"github.com/nfnt/resize"
+	"go.mongodb.org/mongo-driver/mongo"
 	"image"
 	"image/jpeg"
 	_ "image/jpeg"
 	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
 	"photoserver/config"
+	"photoserver/db"
 	"photoserver/synology"
 	"strings"
 	"sync"
@@ -37,9 +41,10 @@ type ConnectionConfig struct {
 }
 
 type PhotoServerConfig struct {
-	ConnectionConf ConnectionConfig
-	BaseDirectory  string
-	ScaleConf      ScalingConfig
+	ConnectionConf      ConnectionConfig
+	BaseDirectory       string
+	ScaleConf           ScalingConfig
+	IndexedImagesTmpDir string
 }
 
 type IndexationStatus struct {
@@ -48,9 +53,14 @@ type IndexationStatus struct {
 	IndexationOperation  int `json:"indexation_operation"`
 }
 
+type ImageData struct {
+	Id string `json:"id"`
+}
+
 var token string
 var serverConfig PhotoServerConfig
 var GlobalIndexationStatus atomic.Value
+var dbClient *mongo.Client
 
 func indexationStatusHandler(writer http.ResponseWriter, request *http.Request) {
 	status := GlobalIndexationStatus.Load()
@@ -139,7 +149,12 @@ func process(wg *sync.WaitGroup, queue chan synology.NasFile) {
 			return
 		}
 		//Make db record here
-		err := processImage(file, "")
+		id, err := db.CreateImageDocument(dbClient, file.Path, false)
+		if err != nil {
+			fmt.Println(err)
+		}
+		fmt.Println("DB record was added with id: " + id)
+		err = processImage(file, id)
 		if err != nil {
 			fmt.Println(err)
 		}
@@ -172,8 +187,13 @@ func processImage(file synology.NasFile, key string) error {
 
 	//go describe (find faces e.t.c) - unblocking operation to AI service
 
-	fmt.Println("Save file: " + "C:\\temp\\" + file.Path + file.Name)
-	err = ioutil.WriteFile("C:\\temp\\"+file.Name, resizedImg, 0644)
+	fmt.Println("Save file: " + serverConfig.IndexedImagesTmpDir + key)
+	err = ioutil.WriteFile(serverConfig.IndexedImagesTmpDir+key, resizedImg, 0644)
+	if err != nil {
+		return err
+	}
+
+	err = db.UpdateIndexationStatus(dbClient, key, true)
 	if err != nil {
 		return err
 	}
@@ -205,6 +225,54 @@ func imgScale(image image.Rectangle, scale float64) (width, height uint) {
 	return uint(float64(image.Dx()) * scale), uint(float64(image.Dy()) * scale)
 }
 
+func randomImageHandler(writer http.ResponseWriter, request *http.Request) {
+	imgId, err := db.GetRandomImageDocument(dbClient)
+	if err != nil {
+		fmt.Println(err)
+		writer.WriteHeader(http.StatusNotFound)
+		_, _ = writer.Write([]byte(err.Error()))
+		return
+
+	}
+
+	writer.Header().Set("Content-Type", "application/json")
+	err = json.NewEncoder(writer).Encode(ImageData{Id: imgId})
+	if err != nil {
+		fmt.Println(err)
+		writer.WriteHeader(http.StatusInternalServerError)
+		_, _ = writer.Write([]byte(err.Error()))
+		return
+	}
+}
+
+func getImageHandler(writer http.ResponseWriter, request *http.Request) {
+	vars := mux.Vars(request)
+	id := vars["id"]
+	writer.Header().Set("Content-Type", "image/jpeg")
+	file, err := os.Open(serverConfig.IndexedImagesTmpDir + id)
+	if err != nil {
+		fmt.Println(err)
+		writer.WriteHeader(http.StatusInternalServerError)
+		_, _ = writer.Write([]byte(err.Error()))
+		return
+	}
+	defer file.Close()
+	data, readErr := ioutil.ReadAll(bufio.NewReader(file))
+	if readErr != nil {
+		fmt.Println(readErr)
+		writer.WriteHeader(http.StatusInternalServerError)
+		_, _ = writer.Write([]byte(readErr.Error()))
+		return
+	}
+	_, err = writer.Write(data)
+	if err != nil {
+		fmt.Println(readErr)
+		writer.WriteHeader(http.StatusInternalServerError)
+		_, _ = writer.Write([]byte(readErr.Error()))
+		return
+	}
+}
+
 func main() {
 	synToken, err := synology.GetToken()
 	if err != nil {
@@ -213,6 +281,17 @@ func main() {
 	token = synToken
 	fmt.Print(token)
 
+	uri := config.GetEnvOrPanic("DB_URI")
+	login := config.GetEnvOrPanic("DB_LOGIN")
+	psswd := config.GetEnvOrPanic("DB_PSSWD")
+
+	dbClient, err = db.NewMongoClient(uri, login, psswd)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println("Connection to DB is established")
+
 	serverConfig = PhotoServerConfig{
 		ConnectionConf: ConnectionConfig{Port: config.GetEnv("PORT", "8080")},
 		BaseDirectory:  config.GetEnv("BASE_DIRECTORY", "/photo"),
@@ -220,12 +299,14 @@ func main() {
 			Width:  config.GetEnvAsFloat64("SCALE_WIDTH", 0.0),
 			Height: config.GetEnvAsFloat64("SCALE_HEIGHT", 0.0),
 		},
+		IndexedImagesTmpDir: config.GetEnvOrPanic("INDEXED_IMG_TMP_DIR"),
 	}
 
 	router := mux.NewRouter().StrictSlash(true)
 
-	router.HandleFunc("/api/v1/photos/{id}/image", func(writer http.ResponseWriter, request *http.Request) {}).Methods("GET")
-	router.HandleFunc("/api/v1/index", indexationHandler).Methods("POST") // params: full=true/false. Unblocking operation
+	router.HandleFunc("/api/v1/photos/{id}/image", getImageHandler).Methods("GET")
+	router.HandleFunc("/api/v1/photos", randomImageHandler).Methods("GET") //returns random image
+	router.HandleFunc("/api/v1/index", indexationHandler).Methods("POST")  // params: full=true/false. Unblocking operation
 	router.HandleFunc("/api/v1/index/status", indexationStatusHandler).Methods("GET")
 	router.HandleFunc("/api/v1/photos/{id}", func(writer http.ResponseWriter, request *http.Request) {}).Methods("GET") // returns info about the photo
 	router.HandleFunc("/api/v1/photos", func(writer http.ResponseWriter, request *http.Request) {}).Methods("GET")      // returns list all photos

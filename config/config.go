@@ -14,6 +14,14 @@ func GetEnv(key string, defaultValue string) string {
 	return defaultValue
 }
 
+func GetEnvOrPanic(key string) string {
+	if value, exists := os.LookupEnv(key); exists {
+		return value
+	}
+
+	panic("Can't find environment variable " + key)
+}
+
 func GetEnvAsInt(name string, defaultValue int) int {
 	valueStr := GetEnv(name, "")
 	if value, err := strconv.Atoi(valueStr); err == nil {
