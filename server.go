@@ -1,5 +1,21 @@
 package main
 
+/*
+Environment variables:
+SYN_HOST  Host of synology server
+SYN_PORT  Port of synology server
+SYN_USER  User of synology with rights to watch photos
+SYN_PSSWD Password of synology user
+PORT Port of this service
+BASE_DIRECTORY Base directory of synology where photos are located. From this directory recursive indexation will be performed
+SCALE_WIDTH New width of indexed image
+SCALE_HEIGHT New height of indexed image
+DB_URI Uri of mongodb
+DB_LOGIN Login of mongodb user
+DB_PSSWD Password of mongodb user
+INDEXED_IMG_TMP_DIR Directory where indexed files will be located
+*/
+
 import (
 	"bufio"
 	"bytes"
